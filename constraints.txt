@@ -1,0 +1,2 @@
+# Exclude pysha3 - use built-in sha3 from Python 3.6+ or pycryptodome backend
+pysha3

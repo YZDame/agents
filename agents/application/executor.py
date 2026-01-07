@@ -8,8 +8,8 @@ import math
 
 from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI
 
+from agents.llm import LLMFactory, LLMProvider
 from agents.polymarket.gamma import GammaMarketClient as Gamma
 from agents.connectors.chroma import PolymarketRAG as Chroma
 from agents.utils.objects import SimpleEvent, SimpleMarket
@@ -29,16 +29,27 @@ def retain_keys(data, keys_to_retain):
         return data
 
 class Executor:
-    def __init__(self, default_model='gpt-3.5-turbo-16k') -> None:
+    def __init__(self, default_model: str = None) -> None:
         load_dotenv()
-        max_token_model = {'gpt-3.5-turbo-16k':15000, 'gpt-4-1106-preview':95000}
-        self.token_limit = max_token_model.get(default_model)
-        self.prompter = Prompter()
-        self.openai_api_key = os.getenv("OPENAI_API_KEY")
-        self.llm = ChatOpenAI(
-            model=default_model, #gpt-3.5-turbo"
+        # Get LLM provider from environment, default to OpenAI
+        llm_provider_str = os.getenv("LLM_PROVIDER", "openai")
+        self.llm_provider = LLMProvider(llm_provider_str)
+        # Get model from environment or use default
+        model = default_model or os.getenv("LLM_MODEL")
+        # Create LLM using factory
+        self.llm = LLMFactory.create_llm(
+            provider=self.llm_provider,
+            model=model,
             temperature=0,
         )
+        # Store the actual model name being used (handle different LLM implementations)
+        self.model_name = getattr(self.llm, 'model_name', None) or getattr(self.llm, 'model', model)
+        # Get token limit for the actual model being used
+        self.token_limit = LLMFactory.get_token_limit(
+            self.llm_provider,
+            self.model_name
+        )
+        self.prompter = Prompter()
         self.gamma = Gamma()
         self.chroma = Chroma()
         self.polymarket = Polymarket()

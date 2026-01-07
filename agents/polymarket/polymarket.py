@@ -11,7 +11,11 @@ from dotenv import load_dotenv
 
 from web3 import Web3
 from web3.constants import MAX_INT
-from web3.middleware import geth_poa_middleware
+try:
+    from web3.middleware import geth_poa_middleware
+except ImportError:
+    # web3 7.x no longer has geth_poa_middleware (automatically applied)
+    geth_poa_middleware = None
 
 import httpx
 from py_clob_client.client import ClobClient
@@ -57,7 +61,9 @@ class Polymarket:
         self.ctf_address = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
 
         self.web3 = Web3(Web3.HTTPProvider(self.polygon_rpc))
-        self.web3.middleware_onion.inject(geth_poa_middleware, layer=0)
+        # Only inject geth_poa_middleware for web3 < 7.0
+        if geth_poa_middleware is not None:
+            self.web3.middleware_onion.inject(geth_poa_middleware, layer=0)
 
         self.usdc = self.web3.eth.contract(
             address=self.usdc_address, abi=self.erc20_approve
@@ -186,9 +192,16 @@ class Polymarket:
         )
         print(ctf_approval_tx_receipt)
 
-    def get_all_markets(self) -> "list[SimpleMarket]":
+    def get_all_markets(self, limit: int = 1000) -> "list[SimpleMarket]":
         markets = []
-        res = httpx.get(self.gamma_markets_endpoint)
+        # 添加查询参数获取活跃市场
+        params = {
+            "active": True,
+            "closed": False,
+            "archived": False,
+            "limit": limit
+        }
+        res = httpx.get(self.gamma_markets_endpoint, params=params)
         if res.status_code == 200:
             for market in res.json():
                 try:
@@ -235,23 +248,31 @@ class Polymarket:
             market["clob_token_ids"] = token_id
         return market
 
-    def get_all_events(self) -> "list[SimpleEvent]":
+    def get_all_events(self, limit: int = 1000) -> "list[SimpleEvent]":
         events = []
-        res = httpx.get(self.gamma_events_endpoint)
+        # 添加查询参数获取活跃事件
+        params = {
+            "active": True,
+            "closed": False,
+            "archived": False,
+            "limit": limit
+        }
+        res = httpx.get(self.gamma_events_endpoint, params=params)
         if res.status_code == 200:
-            print(len(res.json()))
             for event in res.json():
                 try:
-                    print(1)
                     event_data = self.map_api_to_event(event)
                     events.append(SimpleEvent(**event_data))
                 except Exception as e:
-                    print(e)
+                    # Skip events that can't be mapped
                     pass
         return events
 
     def map_api_to_event(self, event) -> SimpleEvent:
         description = event["description"] if "description" in event.keys() else ""
+        # Store markets as a comma-separated string of market IDs
+        # (keeping this format for compatibility with SimpleEvent model)
+        market_ids = [str(x["id"]) for x in event.get("markets", [])]
         return {
             "id": int(event["id"]),
             "ticker": event["ticker"],
@@ -265,7 +286,7 @@ class Polymarket:
             "featured": event["featured"],
             "restricted": event["restricted"],
             "end": event["endDate"],
-            "markets": ",".join([x["id"] for x in event["markets"]]),
+            "markets": ",".join(market_ids),  # Comma-separated market IDs
         }
 
     def filter_events_for_trading(
@@ -273,9 +294,10 @@ class Polymarket:
     ) -> "list[SimpleEvent]":
         tradeable_events = []
         for event in events:
+            # 只过滤活跃、非关闭、非归档的事件
+            # 注意：不过滤 restricted 事件，因为 Polymarket 上大部分活跃市场都是 restricted 的
             if (
                 event.active
-                and not event.restricted
                 and not event.archived
                 and not event.closed
             ):
