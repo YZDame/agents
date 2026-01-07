@@ -4,7 +4,11 @@ import './Layout.css';
 const navItems = [
   { path: '/dashboard', label: 'Dashboard' },
   { path: '/markets', label: 'Markets' },
+  { path: '/events', label: 'Events' },
   { path: '/trading', label: 'Trading' },
+  { path: '/ai-chat', label: 'AI Chat' },
+  { path: '/autonomous-trading', label: 'Auto Trade' },
+  { path: '/market-creation', label: 'Create Market' },
   { path: '/agents', label: 'Agents' },
   { path: '/news', label: 'News' },
 ];

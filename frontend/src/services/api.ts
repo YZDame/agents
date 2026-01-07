@@ -1,4 +1,9 @@
-import type { Market, Trade, Agent, NewsItem, TradeRequest, TradeResponse, DashboardStats } from '../types';
+import type {
+  Market, Trade, Agent, NewsItem, TradeRequest, TradeResponse, DashboardStats,
+  Event, LLMChatRequest, LLMChatResponse, RAGQueryRequest, RAGQueryResponse,
+  RAGResult, RAGCreateRequest, AutonomousTraderRequest, AutonomousTraderResponse,
+  MarketIdeaResponse
+} from '../types';
 
 const API_BASE = '/api';
 
@@ -61,5 +66,77 @@ export const api = {
     request<NewsItem[]>(`/news/search`, {
       method: 'POST',
       body: JSON.stringify({ query }),
+    }),
+
+  // ========================================
+  // EVENTS
+  // ========================================
+
+  getEvents: (params?: { limit?: number; sort_by?: string }) => {
+    const searchParams = new URLSearchParams();
+    if (params?.limit) searchParams.append('limit', params.limit.toString());
+    if (params?.sort_by) searchParams.append('sort_by', params.sort_by);
+    const queryString = searchParams.toString();
+    return request<Event[]>(`/events${queryString ? `?${queryString}` : ''}`);
+  },
+
+  getEvent: (id: string) => request<Event>(`/events/${id}`),
+
+  // ========================================
+  // LLM CHAT
+  // ========================================
+
+  chatLLM: (chatRequest: LLMChatRequest) =>
+    request<LLMChatResponse>('/llm/chat', {
+      method: 'POST',
+      body: JSON.stringify(chatRequest),
+    }),
+
+  // ========================================
+  // RAG
+  // ========================================
+
+  createRAGDatabase: (ragRequest: RAGCreateRequest) =>
+    request<{ success: boolean; message: string }>('/rag/create', {
+      method: 'POST',
+      body: JSON.stringify(ragRequest),
+    }),
+
+  queryRAGDatabase: (ragRequest: RAGQueryRequest) =>
+    request<RAGQueryResponse>('/rag/query', {
+      method: 'POST',
+      body: JSON.stringify(ragRequest),
+    }),
+
+  filterEventsRAG: (query: string) =>
+    request<RAGResult[]>('/rag/filter-events', {
+      method: 'POST',
+      body: JSON.stringify({ query }),
+    }),
+
+  // ========================================
+  // AUTONOMOUS TRADING
+  // ========================================
+
+  getTradeRecommendation: () =>
+    request<AutonomousTraderResponse>('/trading/recommendation', {
+      method: 'POST',
+      body: JSON.stringify({}),
+    }),
+
+  executeAutonomousTrader: (traderRequest: AutonomousTraderRequest) =>
+    request<AutonomousTraderResponse>('/trading/execute-autonomous', {
+      method: 'POST',
+      body: JSON.stringify(traderRequest),
+    }),
+
+  // ========================================
+  // MARKET CREATION
+  // ========================================
+
+  generateMarketIdea: () =>
+    request<MarketIdeaResponse>('/markets/generate-idea', {
+      method: 'POST',
+      body: JSON.stringify({}),
     }),
 };

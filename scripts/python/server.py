@@ -1,6 +1,6 @@
 import os
 import sys
-from typing import Optional
+from typing import Optional, List
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
@@ -14,6 +14,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 from agents.polymarket.polymarket import Polymarket
 from agents.polymarket.gamma import GammaMarketClient
 from agents.connectors.news import News
+from agents.application.executor import Executor
+from agents.application.trade import Trader
+from agents.application.creator import Creator
+from agents.connectors.chroma import PolymarketRAG
 
 load_dotenv()
 
@@ -32,6 +36,10 @@ app.add_middleware(
 polymarket = Polymarket()
 gamma = GammaMarketClient()
 news_client = News()
+executor = Executor()
+trader = Trader()
+creator = Creator()
+polymarket_rag = PolymarketRAG()
 
 
 # Pydantic models for API requests/responses
@@ -93,6 +101,72 @@ class NewsItem(BaseModel):
     source: str
     publishedAt: str
     relevance: Optional[float] = None
+
+
+# New Pydantic models for CLI features
+class EventItem(BaseModel):
+    id: str
+    ticker: str
+    slug: str
+    title: str
+    description: str
+    endDate: str
+    active: bool
+    closed: bool
+    restricted: bool
+    marketsCount: int
+    markets: List[str]
+
+
+class LLMChatRequest(BaseModel):
+    message: str
+    mode: str  # 'general', 'polymarket', 'superforecaster'
+    context: Optional[dict] = None
+
+
+class LLMChatResponse(BaseModel):
+    response: str
+    mode: str
+    timestamp: str
+
+
+class RAGQueryRequest(BaseModel):
+    query: str
+    filter_type: str
+    local_directory: Optional[str] = None
+
+
+class RAGQueryResponse(BaseModel):
+    results: List[dict]
+    query: str
+    count: int
+
+
+class RAGCreateRequest(BaseModel):
+    local_directory: str
+    data_type: str
+
+
+class AutonomousTraderRequest(BaseModel):
+    execute_trade: bool = False
+    dry_run: bool = True
+
+
+class AutonomousTraderResponse(BaseModel):
+    steps_completed: List[str]
+    events_found: int
+    events_filtered: int
+    markets_found: int
+    markets_filtered: int
+    trade_recommendation: Optional[dict] = None
+    trade_executed: bool
+    error: Optional[str] = None
+
+
+class MarketIdeaResponse(BaseModel):
+    market_description: str
+    analysis: str
+    timestamp: str
 
 
 # Mock data storage (in production, use a database)
@@ -376,6 +450,264 @@ def search_news(query: dict):
                 )
 
         return news_items
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ========================================
+# EVENTS ENDPOINTS
+# ========================================
+
+@app.get("/api/events", response_model=list[EventItem])
+def get_events(limit: int = Query(50, ge=1, le=100), sort_by: str = "number_of_markets"):
+    """Get list of events"""
+    try:
+        events = polymarket.get_all_events()
+        events = polymarket.filter_events_for_trading(events)
+
+        if sort_by == "number_of_markets":
+            events = sorted(
+                events,
+                key=lambda x: len(x.markets.split(",")) if x.markets else 0,
+                reverse=True
+            )
+
+        return [
+            EventItem(
+                id=str(e.id),
+                ticker=e.ticker,
+                slug=e.slug,
+                title=e.title,
+                description=e.description[:500] if e.description else "",
+                endDate=e.end,
+                active=e.active,
+                closed=e.closed,
+                restricted=e.restricted,
+                marketsCount=len(e.markets.split(",")) if e.markets else 0,
+                markets=e.markets.split(",") if e.markets else []
+            )
+            for e in events[:limit]
+        ]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/events/{event_id}", response_model=EventItem)
+def get_event(event_id: str):
+    """Get a specific event by ID"""
+    try:
+        events = polymarket.get_all_events()
+        for e in events:
+            if str(e.id) == event_id:
+                return EventItem(
+                    id=str(e.id),
+                    ticker=e.ticker,
+                    slug=e.slug,
+                    title=e.title,
+                    description=e.description,
+                    endDate=e.end,
+                    active=e.active,
+                    closed=e.closed,
+                    restricted=e.restricted,
+                    marketsCount=len(e.markets.split(",")) if e.markets else 0,
+                    markets=e.markets.split(",") if e.markets else []
+                )
+        raise HTTPException(status_code=404, detail="Event not found")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ========================================
+# LLM CHAT ENDPOINTS
+# ========================================
+
+@app.post("/api/llm/chat", response_model=LLMChatResponse)
+def llm_chat(request: LLMChatRequest):
+    """LLM chat as market analyst"""
+    try:
+        if request.mode == "general":
+            response = executor.get_llm_response(request.message)
+        elif request.mode == "polymarket":
+            response = executor.get_polymarket_llm(request.message)
+        elif request.mode == "superforecaster":
+            context = request.context or {}
+            response = executor.get_superforecast(
+                event_title=context.get("event_title", ""),
+                market_question=context.get("market_question", ""),
+                outcome=context.get("outcome", "")
+            )
+        else:
+            raise HTTPException(status_code=400, detail="Invalid mode")
+
+        return LLMChatResponse(
+            response=response,
+            mode=request.mode,
+            timestamp=datetime.now().isoformat()
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ========================================
+# RAG ENDPOINTS
+# ========================================
+
+@app.post("/api/rag/create")
+def create_rag_database(request: RAGCreateRequest):
+    """Create local RAG database"""
+    try:
+        if request.data_type == "markets":
+            polymarket_rag.create_local_markets_rag(local_directory=request.local_directory)
+        else:
+            raise HTTPException(status_code=400, detail="Only markets RAG creation is supported")
+
+        return {
+            "success": True,
+            "message": f"RAG database created at {request.local_directory}",
+            "data_type": request.data_type
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/rag/query", response_model=RAGQueryResponse)
+def query_rag_database(request: RAGQueryRequest):
+    """Query RAG database with semantic search"""
+    try:
+        if request.filter_type == "markets":
+            results = polymarket_rag.query_local_markets_rag(
+                local_directory=request.local_directory or "./local_db",
+                query=request.query
+            )
+        else:
+            raise HTTPException(status_code=400, detail="Only markets query is supported")
+
+        # Convert results to serializable format
+        serialized_results = []
+        for doc, score in results:
+            serialized_results.append({
+                "content": doc.page_content,
+                "metadata": doc.metadata,
+                "score": float(score)
+            })
+
+        return RAGQueryResponse(
+            results=serialized_results,
+            query=request.query,
+            count=len(serialized_results)
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/rag/filter-events", response_model=list[dict])
+def rag_filter_events(query: str):
+    """Filter events using RAG"""
+    try:
+        events = polymarket.get_all_tradeable_events()
+        filtered = executor.filter_events_with_rag(events)
+
+        results = []
+        for doc, score in filtered:
+            results.append({
+                "content": doc.page_content,
+                "metadata": doc.metadata,
+                "score": float(score)
+            })
+
+        return results
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ========================================
+# AUTONOMOUS TRADING ENDPOINTS
+# ========================================
+
+@app.post("/api/trading/recommendation", response_model=AutonomousTraderResponse)
+def get_trade_recommendation():
+    """Get trade recommendation without executing"""
+    try:
+        # Clear local DBs first
+        trader.pre_trade_logic()
+
+        events = polymarket.get_all_tradeable_events()
+        filtered_events = executor.filter_events_with_rag(events)
+        markets = executor.map_filtered_events_to_markets(filtered_events)
+        filtered_markets = executor.filter_markets(markets)
+
+        if not filtered_markets:
+            return AutonomousTraderResponse(
+                steps_completed=["Fetch events", "Filter events", "Map to markets", "Filter markets"],
+                events_found=len(events),
+                events_filtered=len(filtered_events),
+                markets_found=len(markets),
+                markets_filtered=0,
+                trade_executed=False,
+                error="No suitable markets found"
+            )
+
+        # Get trade recommendation
+        best_trade = executor.source_best_trade(filtered_markets[0])
+
+        return AutonomousTraderResponse(
+            steps_completed=["Fetch events", "Filter events", "Map to markets", "Filter markets", "Generate recommendation"],
+            events_found=len(events),
+            events_filtered=len(filtered_events),
+            markets_found=len(markets),
+            markets_filtered=len(filtered_markets),
+            trade_recommendation={"trade": best_trade},
+            trade_executed=False
+        )
+    except Exception as e:
+        return AutonomousTraderResponse(
+            steps_completed=[],
+            events_found=0,
+            events_filtered=0,
+            markets_found=0,
+            markets_filtered=0,
+            trade_executed=False,
+            error=str(e)
+        )
+
+
+@app.post("/api/trading/execute-autonomous", response_model=AutonomousTraderResponse)
+def execute_autonomous_trader(request: AutonomousTraderRequest):
+    """Run autonomous trader (optionally execute trade)"""
+    try:
+        if not request.execute_trade or request.dry_run:
+            # Just get recommendation
+            return get_trade_recommendation()
+
+        # Full execution (disabled for safety)
+        return AutonomousTraderResponse(
+            steps_completed=["Autonomous trading disabled in safe mode"],
+            events_found=0,
+            events_filtered=0,
+            markets_found=0,
+            markets_filtered=0,
+            trade_executed=False,
+            error="Real trading disabled for safety"
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ========================================
+# MARKET CREATION ENDPOINTS
+# ========================================
+
+@app.post("/api/markets/generate-idea", response_model=MarketIdeaResponse)
+def generate_market_idea():
+    """Generate new market idea using LLM"""
+    try:
+        market_description = creator.one_best_market()
+
+        return MarketIdeaResponse(
+            market_description=market_description,
+            analysis="Generated based on market gaps and opportunities",
+            timestamp=datetime.now().isoformat()
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
